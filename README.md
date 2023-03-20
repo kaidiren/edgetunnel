@@ -46,6 +46,14 @@ https://blog.cloudflare.com/introducing-socket-workers/
 
 [render](./doc/render.md)
 
+### Docker
+
+``` bash
+docker run -d -p 4600:4100 -e UUID=ce6d9073-7085-4cb1-a64d-382489a2af94 zizifn/node-vless:latest
+```
+> 如果你想让 DNS IPV4 优先， 请设置环境变量DNSORDER=ipv4first
+
+
 ## 客户端 v2rayN 配置
 
 > ⚠️ 由于 edge 平台限制，无法转发 UDP 包。请在配置时候，把 DNS 的策略改成 "Asis", 否则会影响速度。

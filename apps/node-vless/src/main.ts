@@ -2,8 +2,7 @@ import { createServer } from 'http';
 import { parse } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { index401, serverStaticFile } from './app/utils';
-import * as uuid from 'uuid';
-import * as lodash from 'lodash';
+import { validate } from 'uuid';
 import { createReadStream } from 'node:fs';
 import { setDefaultResultOrder } from 'node:dns';
 import { createSocket, Socket as UDPSocket } from 'node:dgram';
@@ -29,7 +28,7 @@ if (dnOder === 'ipv4first') {
   setDefaultResultOrder(dnOder);
 }
 
-let isVaildUser = uuid.validate(userID);
+let isVaildUser = validate(userID);
 if (!isVaildUser) {
   console.log('not set valid UUID');
 }
@@ -78,7 +77,7 @@ const server = createServer((req, resp) => {
 });
 const vlessWServer = new WebSocketServer({ noServer: true });
 
-vlessWServer.on('connection', async function connection(ws) {
+vlessWServer.on('connection', async function connection(ws, request) {
   let address = '';
   let portWithRandomLog = '';
   try {
@@ -88,20 +87,27 @@ vlessWServer.on('connection', async function connection(ws) {
     let remoteConnection: Duplex = null;
     let udpClientStream: TransformStream = null;
     let remoteConnectionReadyResolve: Function;
-
-    const readableWebSocketStream = makeReadableWebSocketStream(ws, log);
+    const earlyDataHeader = request.headers['sec-websocket-protocol'];
+    const readableWebSocketStream = makeReadableWebSocketStream(
+      ws,
+      earlyDataHeader,
+      log
+    );
     let vlessResponseHeader: Uint8Array | null = null;
 
-    // ws --> remote
+    // ws  --> remote
     readableWebSocketStream
       .pipeTo(
         new WritableStream({
           async write(chunk: Buffer, controller) {
+            if (!Buffer.isBuffer(chunk)) {
+              chunk = Buffer.from(chunk);
+            }
             if (udpClientStream) {
               const writer = udpClientStream.writable.getWriter();
               // nodejs buffer to ArrayBuffer issue
               // https://nodejs.org/dist/latest-v18.x/docs/api/buffer.html#bufbuffer
-              writer.write(
+              await writer.write(
                 chunk.buffer.slice(
                   chunk.byteOffset,
                   chunk.byteOffset + chunk.length
@@ -127,7 +133,7 @@ vlessWServer.on('connection', async function connection(ws) {
               rawDataIndex,
               vlessVersion,
               isUDP,
-            } = processVlessHeader(vlessBuffer, userID, uuid, lodash);
+            } = processVlessHeader(vlessBuffer, userID);
             address = addressRemote || '';
             portWithRandomLog = `${portRemote}--${Math.random()} ${
               isUDP ? 'udp ' : 'tcp '
@@ -143,7 +149,7 @@ vlessWServer.on('connection', async function connection(ws) {
             if (isUDP) {
               udpClientStream = makeUDPSocketStream(portRemote, address);
               const writer = udpClientStream.writable.getWriter();
-              writer.write(rawClientData);
+              writer.write(rawClientData).catch(error=>console.log)
               writer.releaseLock();
               remoteConnectionReadyResolve(udpClientStream);
             } else {
@@ -153,7 +159,7 @@ vlessWServer.on('connection', async function connection(ws) {
             }
           },
           close() {
-            // if (udpClientStream) {
+            // if (udpClientStream ) {
             //   udpClientStream.writable.close();
             // }
             console.log(
@@ -161,6 +167,7 @@ vlessWServer.on('connection', async function connection(ws) {
             );
           },
           abort(reason) {
+            // TODO: log can be remove, abort will catch by catch block
             console.log(
               `[${address}:${portWithRandomLog}] readableWebSocketStream is abort`,
               JSON.stringify(reason)
@@ -186,6 +193,7 @@ vlessWServer.on('connection', async function connection(ws) {
       responseStream = Readable.toWeb(remoteConnection);
     }
 
+    // if readable not pipe can't wait fro writeable write method
     await responseStream.pipeTo(
       new WritableStream({
         start() {
@@ -246,7 +254,8 @@ async function connect2Remote(port, host, log: Function): Promise<Socket> {
       {
         port: port,
         host: host,
-        autoSelectFamily: true,
+        // https://github.com/nodejs/node/pull/46587
+        // autoSelectFamily: true,
       },
       () => {
         log(`connected`);
@@ -294,11 +303,12 @@ function makeUDPSocketStream(portRemote, address) {
         );
       });
       udpClient.on('error', (error) => {
+        console.log('udpClient error event', error);
         controller.error(error);
       });
     },
 
-    transform(chunk: ArrayBuffer, controller) {
+    async transform(chunk: ArrayBuffer, controller) {
       //seems v2ray will use same web socket for dns query..
       //And v2ray will combine A record and AAAA record into one ws message and use 2 btye for dns query length
       for (let index = 0; index < chunk.byteLength; ) {
@@ -308,13 +318,16 @@ function makeUDPSocketStream(portRemote, address) {
           chunk.slice(index + 2, index + 2 + udpPakcetLength)
         );
         index = index + 2 + udpPakcetLength;
+       await new Promise((resolve, reject)=>{
         udpClient.send(udpData, portRemote, address, (err) => {
           if (err) {
-            console.log(err);
-            controller.error('Failed to send UDP packet !!');
-            udpClient.close();
+            console.log('udps send error', err);
+            controller.error(`Failed to send UDP packet !! ${err}`);
+            safeCloseUDP(udpClient);
           }
+          resolve(true)
         });
+       })
         index = index;
       }
 
@@ -324,9 +337,19 @@ function makeUDPSocketStream(portRemote, address) {
     },
 
     flush(controller) {
-      udpClient.close();
+      safeCloseUDP(udpClient);
       controller.terminate();
     },
   });
   return transformStream;
+}
+
+
+function safeCloseUDP(client: UDPSocket){
+  try{
+    client.close()
+  }catch(error){
+    console.log('error close udp', error);
+  }
+
 }
